@@ -1,547 +1,290 @@
 ---
 name: worktree-setup
-description: Set up git worktree management with isolated Postgres, Redis, and ports for parallel development. Run once per project to generate standalone scripts.
+description: Set up git worktree management with isolated databases, caches, and ports for parallel development. Run once per project to generate standalone scripts.
 disable-model-invocation: true
 allowed-tools: Bash, Read, Write, Glob, Grep, Edit
 ---
 
 # Worktree Setup Skill
 
-You are setting up git worktree management for this project. Follow each phase below in order. Adapt all generated scripts and config to what you detect in the project.
+You are setting up git worktree management for this project. Your job is to analyze the project, then generate **standalone shell scripts** that manage worktrees with fully isolated resources (databases, caches, ports, env files). After setup, everything works via `git wt` with zero dependency on Claude Code.
 
-## Phase 1: Analyze Project
+Follow the phases below. At each step, make decisions based on what you actually find in the project — do not assume any specific stack.
 
-### 1.1 Verify Prerequisites
+---
 
-Run these checks:
+## Phase 1: Analyze the Project
 
-```bash
-# Must be in a git repo
-git rev-parse --show-toplevel
+### 1.1 Verify This Is a Git Repository
 
-# Must not already be set up
-test -d .worktree && echo "ALREADY_EXISTS" || echo "OK"
-```
+Confirm the working directory is inside a git repo. If not, stop and tell the user.
 
-If `.worktree` already exists, ask the user if they want to re-run setup (which will overwrite existing scripts but preserve config.json worktree entries).
+If `.worktree/` already exists, ask the user whether to re-run setup (overwrite scripts but preserve existing worktree entries in config).
 
-### 1.2 Detect Project Type
+### 1.2 Detect the Project Stack
 
-Check for these files at the repo root to determine the project type and package manager:
+Look for manifest files to determine the language, framework, and package manager. Check for:
 
-| File | Type | Init Command |
-|------|------|-------------|
-| `package-lock.json` | Node.js | `npm install` |
-| `yarn.lock` | Node.js | `yarn install` |
-| `pnpm-lock.yaml` | Node.js | `pnpm install` |
-| `bun.lockb` | Node.js | `bun install` |
-| `package.json` (no lockfile) | Node.js | `npm install` |
-| `requirements.txt` | Python | `pip install -r requirements.txt` |
-| `Pipfile` | Python | `pipenv install` |
-| `pyproject.toml` | Python | `pip install -e .` |
-| `Gemfile` | Ruby | `bundle install` |
-| `go.mod` | Go | `go mod download` |
-| `Cargo.toml` | Rust | `cargo build` |
-| `composer.json` | PHP | `composer install` |
+- **Node.js**: `package.json`, and which lockfile exists (`package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `bun.lockb`) to determine the package manager
+- **Python**: `requirements.txt`, `Pipfile`, `pyproject.toml`, `poetry.lock`, `uv.lock`
+- **Ruby**: `Gemfile`
+- **Go**: `go.mod`
+- **Rust**: `Cargo.toml`
+- **PHP**: `composer.json`
+- **Java/Kotlin**: `build.gradle`, `pom.xml`
+- **Elixir**: `mix.exs`
+- Other manifest files you recognize
 
-Store the detected init command(s) for later.
+From this, determine the **dependency install command** that should run in each new worktree (e.g., the correct `install` command for the detected package manager).
 
-### 1.3 Detect Environment Variables
+For Node.js projects, also check `package.json` scripts to identify the dev server command (commonly `dev`, `start:dev`, `serve`, or `start`). Note this for the summary but don't put it in the scripts — worktrees are for development, the user starts their own server.
 
-Read `.env` file (if it exists) and look for these patterns:
+### 1.3 Detect Environment Configuration
 
-- **DATABASE_URL**: Extract host, port, user, password, database name. Common formats:
-  - `postgresql://user:pass@host:port/dbname`
-  - `postgres://user:pass@host:port/dbname`
-  - `mysql://user:pass@host:port/dbname`
-- **REDIS_URL**: Extract host, port, DB number. Common formats:
-  - `redis://host:port/db`
-  - `redis://host:port`
-- **PORT**: The application port number
+Read the `.env` file (and `.env.local`, `.env.development`, etc. if they exist). Identify:
 
-Also check for individual DB vars like `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `PGDATABASE`, `PGHOST`, etc.
+**Database connection** — Look for any of these patterns:
+- `DATABASE_URL` (connection string format: `postgresql://`, `postgres://`, `mysql://`, `mongodb://`, `sqlite:`, etc.)
+- Individual vars: `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`
+- Postgres-specific: `PGDATABASE`, `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`
+- MySQL-specific: `MYSQL_HOST`, `MYSQL_DATABASE`, etc.
+- ORM-specific: `TYPEORM_DATABASE`, `PRISMA_DATABASE_URL`, etc.
 
-### 1.4 Check Docker Compose
+From the connection info, extract: database type, host, port, user, password, database name.
 
-If `docker-compose.yml` or `docker-compose.yaml` or `compose.yml` or `compose.yaml` exists, read it to find:
-- Postgres service: image, port mapping, environment vars (POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB)
-- Redis service: image, port mapping
+**Cache/queue connection** — Look for:
+- `REDIS_URL` (connection string: `redis://host:port/db` or `rediss://`)
+- Individual vars: `REDIS_HOST`, `REDIS_PORT`, `REDIS_DB`
+- Other caches: `MEMCACHED_URL`, `CACHE_URL`, etc.
 
-Use these values if `.env` doesn't provide them.
+**Application port** — Look for:
+- `PORT`, `APP_PORT`, `SERVER_PORT`, `HTTP_PORT`
+- Framework-specific: `NEXT_PUBLIC_PORT`, `VITE_PORT`, `FLASK_RUN_PORT`, `RAILS_PORT`
 
-### 1.5 Check Available Tools
+**Other env vars that need per-worktree isolation** — Look for:
+- `APP_NAME`, `APP_URL` (may contain port)
+- `SESSION_NAME`, `COOKIE_NAME` (session isolation)
+- Log file paths, tmp directories
+- Any var that references a resource that would conflict between parallel instances
 
-```bash
-command -v jq && echo "jq: yes" || echo "jq: no"
-command -v psql && echo "psql: yes" || echo "psql: no"
-command -v createdb && echo "createdb: yes" || echo "createdb: no"
-command -v redis-cli && echo "redis-cli: yes" || echo "redis-cli: no"
-command -v lsof && echo "lsof: yes" || echo "lsof: no"
-```
+Record exactly which env var keys you found and their current values. You need this to write correct env patching logic in the scripts.
 
-`jq` is **required** — if missing, tell the user to install it and stop.
+### 1.4 Detect Infrastructure Configuration
 
-### 1.6 Detect Dev Server Command
+Check for Docker Compose files (`docker-compose.yml`, `docker-compose.yaml`, `compose.yml`, `compose.yaml`). If found, read them to understand:
+- Which services run (postgres, mysql, redis, mongo, elasticsearch, etc.)
+- Port mappings (to know the correct host ports)
+- Environment variables (POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB, etc.)
+- Volume mounts
 
-For Node.js projects, check `package.json` for scripts:
-- Prefer: `dev`, `start:dev`, `serve`, `start`
-- Note the command for use in the summary
+This serves as a fallback or confirmation for the env var detection above.
+
+### 1.5 Assess What Tools Are Available
+
+Check which command-line tools are installed on the system. You need this to decide how to implement the scripts. Things to check:
+
+- **JSON processing**: Is there a tool for reading/writing JSON from bash? (e.g., `jq`, `python3`, `node`)
+- **Database tools**: For the detected database type, are the CLI tools available? (e.g., for Postgres: `createdb`, `dropdb`, `pg_dump`, `psql`; for MySQL: `mysql`, `mysqldump`, `mysqladmin`)
+- **Cache tools**: For the detected cache, are CLI tools available? (e.g., `redis-cli`)
+- **Port checking**: Is `lsof` or `ss` or `netstat` available?
+- **General**: `sed`, `awk`, `grep` — these are virtually always available but note the platform (macOS `sed` vs GNU `sed` differ in `-i` flag behavior)
+
+**Based on what's available, you choose the implementation approach for the scripts.** For example:
+- If `jq` is available, use it for JSON. If not, use `python3 -c` or `node -e` or even `awk`/`sed` — whatever works.
+- If `createdb` isn't available but `psql` is, use `psql -c "CREATE DATABASE ..."`.
+- If no database CLI tools are available at all, the scripts should print a warning and skip DB operations.
+
+The scripts must work with whatever is on the machine. Do not require the user to install additional tools — adapt to what exists. If a critical operation can't be done (e.g., no way to process JSON at all), then tell the user what to install.
+
+---
 
 ## Phase 2: Generate Config
 
-Create `.worktree/config.json` with the detected values. Use this exact schema:
+Create `.worktree/config.json` storing everything the scripts need. The config serves as:
+1. A record of detected project settings
+2. A registry of active worktrees and their allocated resources
+3. The single source of truth the scripts read from
+
+### Config Schema
+
+Include only the sections relevant to what was detected. Example for a project with Postgres and Redis:
 
 ```json
 {
-  "base_port": <detected PORT or 3000>,
-  "db_type": "<postgres|mysql|none>",
-  "postgres": {
-    "host": "<detected or localhost>",
-    "port": <detected or 5432>,
-    "user": "<detected or postgres>",
-    "password": "<detected or postgres>",
-    "main_db": "<detected database name>"
+  "base_port": 3000,
+  "database": {
+    "type": "postgres",
+    "host": "localhost",
+    "port": 5432,
+    "user": "postgres",
+    "password": "postgres",
+    "main_db": "myapp"
   },
-  "redis": {
-    "enabled": <true|false>,
-    "host": "<detected or localhost>",
-    "port": <detected or 6379>
+  "cache": {
+    "type": "redis",
+    "host": "localhost",
+    "port": 6379
   },
-  "init_commands": ["<detected install command>"],
-  "env_file": "<.env or null if no env file>",
-  "env_vars": {
-    "database_url_key": "<DATABASE_URL or DB var pattern detected>",
-    "redis_url_key": "<REDIS_URL or null>",
-    "port_key": "<PORT or null>"
+  "init_commands": ["npm install"],
+  "env_file": ".env",
+  "env_mappings": {
+    "DATABASE_URL": "postgresql://postgres:postgres@localhost:5432/myapp",
+    "REDIS_URL": "redis://localhost:6379/0",
+    "PORT": "3000"
   },
   "worktrees": {}
 }
 ```
 
-Omit sections that don't apply (e.g., no `postgres` key if no database detected, no `redis` key if no Redis detected).
+**Considerations:**
+- `env_mappings` records the original env var keys and values that need per-worktree patching. The scripts use this to know exactly what to replace.
+- `worktrees` is an object keyed by sanitized name, storing: branch, port, database name, cache DB number, path, created timestamp.
+- Omit `database` if none detected. Omit `cache` if none detected.
+- Use whatever values you actually detected — don't guess or use defaults if you found real values.
+
+---
 
 ## Phase 3: Generate Scripts
 
-Create these scripts in `.worktree/bin/`. **IMPORTANT**: Adapt the scripts based on Phase 1 detection. The templates below show the full logic — fill in project-specific values where indicated by `__PLACEHOLDER__` comments.
+Create scripts in `.worktree/bin/`. These must be **complete, standalone, and functional** — no placeholders, no TODOs, no references back to this skill. The user (or any developer) should be able to read and understand them.
 
-### 3.1 `.worktree/bin/git-wt`
+You are writing four scripts. The implementation details are up to you based on what you detected, but each script must fulfill the contract described below.
 
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
+### 3.1 `.worktree/bin/git-wt` — Command Router
 
-# Find repo root
-REPO_ROOT="$(git rev-parse --show-toplevel)"
-WT_DIR="$REPO_ROOT/.worktree"
-BIN_DIR="$WT_DIR/bin"
-CONFIG="$WT_DIR/config.json"
+**Contract:**
+- Entry point for all `git wt` commands
+- Subcommands: `create`, `delete` (aliases: `rm`, `remove`), `list` (alias: `ls`), `help`
+- Must find repo root dynamically (not hardcoded paths)
+- Must verify config exists before dispatching
+- Must verify its JSON processing dependency is available
+- Must show helpful usage on `help` or unknown command
 
-if [[ ! -f "$CONFIG" ]]; then
-  echo "Error: .worktree/config.json not found."
-  echo "Run /worktree-setup in Claude Code to initialize."
-  exit 1
-fi
+### 3.2 `.worktree/bin/wt-create.sh` — Create Worktree
 
-if ! command -v jq &>/dev/null; then
-  echo "Error: jq is required but not installed."
-  echo "Install it: brew install jq (macOS) or apt-get install jq (Linux)"
-  exit 1
-fi
+**Arguments:** `<branch-name> [from-ref]` where `from-ref` defaults to HEAD.
 
-CMD="${1:-help}"
-shift || true
+**Contract — must do all of the following:**
 
-case "$CMD" in
-  create)  exec "$BIN_DIR/wt-create.sh" "$@" ;;
-  delete|rm|remove)  exec "$BIN_DIR/wt-delete.sh" "$@" ;;
-  list|ls) exec "$BIN_DIR/wt-list.sh" "$@" ;;
-  help|--help|-h)
-    echo "Usage: git wt <command> [args]"
-    echo ""
-    echo "Commands:"
-    echo "  create <branch> [from]   Create a new worktree with isolated resources"
-    echo "  delete <branch>          Delete a worktree and clean up resources"
-    echo "  list                     List all managed worktrees"
-    echo ""
-    echo "Examples:"
-    echo "  git wt create feat/login          # Branch from current HEAD"
-    echo "  git wt create feat/login main     # Branch from main"
-    echo "  git wt delete feat/login          # Full cleanup"
-    echo "  git wt list                       # Show all worktrees"
-    ;;
-  *)
-    echo "Unknown command: $CMD"
-    echo "Run 'git wt help' for usage."
-    exit 1
-    ;;
-esac
-```
+1. **Sanitize the branch name** for use as directory name and database suffix. Replace characters that are problematic in paths or DB names (`/` -> `-`, strip special chars). Keep the mapping so the user can still reference by original branch name.
 
-### 3.2 `.worktree/bin/wt-create.sh`
+2. **Reject duplicates.** Check the config for an existing worktree with the same sanitized name. Also check if the directory already exists on disk.
 
-Write this script, adapting the DATABASE_URL/REDIS_URL/PORT sed patterns based on what was detected in Phase 1. Here is the full template:
+3. **Allocate a unique port.** Start from `base_port + 1`, scan existing worktree entries in config to find the first unused number. Then verify the port isn't actually in use on the system (a worktree might have been deleted outside of `git wt`). Skip ports that are occupied.
 
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
+4. **Clone the database** (if database detected):
+   - Generate a database name: `{main_db}_wt_{sanitized_name}`
+   - Create it as a copy of the main database. For Postgres, the fastest approach is template copy (`createdb -T`), but this fails if the source has active connections — fall back to dump-and-restore. For MySQL, use `mysqldump | mysql`. For other DBs, do what makes sense or skip with a warning.
+   - If the database tools aren't available, print a warning and skip — don't fail the whole operation.
 
-REPO_ROOT="$(git rev-parse --show-toplevel)"
-WT_DIR="$REPO_ROOT/.worktree"
-CONFIG="$WT_DIR/config.json"
+5. **Allocate a cache namespace** (if cache detected):
+   - For Redis: allocate the next unused DB number (main uses 0, worktrees start from 1). Track allocated numbers in config.
+   - For other caches: decide an appropriate isolation strategy or skip.
 
-# --- Argument parsing ---
-BRANCH="${1:?Usage: git wt create <branch> [from-ref]}"
-FROM_REF="${2:-HEAD}"
+6. **Create the git worktree.** Use `git worktree add <path> -b <branch> <from-ref>`.
 
-# --- Sanitize branch name for directory/db use ---
-SANITIZED="$(echo "$BRANCH" | sed 's/[^a-zA-Z0-9._-]/-/g' | sed 's/--*/-/g' | sed 's/^-//;s/-$//')"
-WT_PATH="$WT_DIR/$SANITIZED"
+7. **Copy and patch the env file.** This is critical — copy the env file to the worktree directory, then replace the relevant values:
+   - Database name in the connection string or individual var
+   - Cache DB number in the connection string or individual var
+   - Port number
+   - Any other vars identified in Phase 1 as needing per-worktree values
 
-# --- Check if already exists ---
-if jq -e ".worktrees[\"$SANITIZED\"]" "$CONFIG" &>/dev/null; then
-  echo "Error: Worktree '$SANITIZED' already exists."
-  echo "Run 'git wt delete $BRANCH' first."
-  exit 1
-fi
+   **Considerations for env patching:**
+   - Connection strings need surgical replacement (change only the DB name part of a URL, not the whole string)
+   - `sed -i` behaves differently on macOS vs Linux. Use `sed -i.bak` + `rm *.bak` for portability, or use another approach.
+   - Some projects use multiple env files (`.env`, `.env.local`). Copy all that exist.
+   - Be careful not to corrupt the env file — test your sed patterns mentally against the actual values you detected.
 
-if [[ -d "$WT_PATH" ]]; then
-  echo "Error: Directory $WT_PATH already exists."
-  exit 1
-fi
+8. **Run init commands** in the worktree directory. Run the detected install command(s). If they fail, warn but don't abort — the worktree itself is still valid.
 
-echo "Creating worktree '$SANITIZED' from $FROM_REF..."
+9. **Update config.json** with the new worktree entry including all allocated resources and a creation timestamp.
 
-# --- Allocate port ---
-BASE_PORT=$(jq -r '.base_port' "$CONFIG")
-USED_PORTS=$(jq -r '[.worktrees[].port] | sort | .[]' "$CONFIG" 2>/dev/null || true)
-NEW_PORT=$((BASE_PORT + 1))
-while echo "$USED_PORTS" | grep -qx "$NEW_PORT" 2>/dev/null; do
-  NEW_PORT=$((NEW_PORT + 1))
-done
+10. **Print a summary** of what was created: path, branch, port, database, cache DB.
 
-# Check port availability
-if command -v lsof &>/dev/null && lsof -i :"$NEW_PORT" &>/dev/null; then
-  echo "Warning: Port $NEW_PORT is in use, finding next available..."
-  while lsof -i :"$NEW_PORT" &>/dev/null 2>&1; do
-    NEW_PORT=$((NEW_PORT + 1))
-  done
-fi
+### 3.3 `.worktree/bin/wt-delete.sh` — Delete Worktree
 
-echo "  Port: $NEW_PORT"
+**Arguments:** `<branch-name>`
 
-# --- Allocate Redis DB ---
-REDIS_DB=""
-# __REDIS_BLOCK_START__ (include this block only if redis is detected)
-REDIS_ENABLED=$(jq -r '.redis.enabled // false' "$CONFIG")
-if [[ "$REDIS_ENABLED" == "true" ]]; then
-  USED_DBS=$(jq -r '[.worktrees[].redis_db // empty] | sort | .[]' "$CONFIG" 2>/dev/null || true)
-  REDIS_DB=1
-  while echo "$USED_DBS" | grep -qx "$REDIS_DB" 2>/dev/null; do
-    REDIS_DB=$((REDIS_DB + 1))
-  done
-  echo "  Redis DB: $REDIS_DB"
-fi
-# __REDIS_BLOCK_END__
+**Contract:**
 
-# --- Create Postgres DB ---
-PG_DB=""
-# __POSTGRES_BLOCK_START__ (include this block only if postgres is detected)
-DB_TYPE=$(jq -r '.db_type // "none"' "$CONFIG")
-if [[ "$DB_TYPE" == "postgres" ]]; then
-  PG_HOST=$(jq -r '.postgres.host' "$CONFIG")
-  PG_PORT=$(jq -r '.postgres.port' "$CONFIG")
-  PG_USER=$(jq -r '.postgres.user' "$CONFIG")
-  PG_PASS=$(jq -r '.postgres.password' "$CONFIG")
-  MAIN_DB=$(jq -r '.postgres.main_db' "$CONFIG")
-  PG_DB="${MAIN_DB}_wt_${SANITIZED}"
+1. **Look up the worktree** in config. Accept both the original branch name and the sanitized form. If not found, list available worktrees and exit.
 
-  export PGPASSWORD="$PG_PASS"
+2. **Drop the database** (if one was created). Use the appropriate tool for the DB type. Use `--if-exists` or equivalent to avoid errors. If the tool isn't available or the drop fails, warn but continue.
 
-  echo "  Database: $PG_DB (cloning from $MAIN_DB)"
+3. **Clean up the cache namespace** (if one was allocated). For Redis, flush the allocated DB. Warn on failure but continue.
 
-  # Try template copy first (faster, but fails if main_db has active connections)
-  if ! createdb -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" -T "$MAIN_DB" "$PG_DB" 2>/dev/null; then
-    echo "  Template copy failed (active connections?), using pg_dump..."
-    createdb -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" "$PG_DB" 2>/dev/null || true
-    if ! pg_dump -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" "$MAIN_DB" | psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" "$PG_DB" > /dev/null 2>&1; then
-      echo "  Warning: Could not clone database. Created empty DB '$PG_DB'."
-      createdb -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" "$PG_DB" 2>/dev/null || true
-    fi
-  fi
+4. **Remove the git worktree.** Use `git worktree remove --force`, falling back to manual directory removal if that fails. Run `git worktree prune` afterward.
 
-  unset PGPASSWORD
-fi
-# __POSTGRES_BLOCK_END__
+5. **Remove the entry from config.json.**
 
-# --- Create git worktree ---
-echo "  Creating git worktree..."
-git worktree add "$WT_PATH" -b "$BRANCH" "$FROM_REF"
+6. **Print confirmation** of what was deleted.
 
-# --- Copy and patch .env ---
-# __ENV_BLOCK_START__ (include this block only if env_file is detected)
-ENV_FILE=$(jq -r '.env_file // empty' "$CONFIG")
-if [[ -n "$ENV_FILE" && -f "$REPO_ROOT/$ENV_FILE" ]]; then
-  cp "$REPO_ROOT/$ENV_FILE" "$WT_PATH/$ENV_FILE"
-  echo "  Patching $ENV_FILE..."
+### 3.4 `.worktree/bin/wt-list.sh` — List Worktrees
 
-  # __ENV_SED_COMMANDS__
-  # Claude: Replace this section with sed commands based on detected env var patterns.
-  # Examples of what to generate:
-  #
-  # If DATABASE_URL=postgresql://user:pass@host:port/dbname was detected:
-  #   sed -i.bak "s|/MAIN_DB_NAME|/$PG_DB|g" "$WT_PATH/$ENV_FILE"
-  #
-  # If individual DB vars (DB_NAME=myapp):
-  #   sed -i.bak "s/^DB_NAME=.*/DB_NAME=$PG_DB/" "$WT_PATH/$ENV_FILE"
-  #
-  # If REDIS_URL=redis://host:port/0 was detected:
-  #   sed -i.bak "s|redis://\([^/]*\)/[0-9]*|redis://\1/$REDIS_DB|g" "$WT_PATH/$ENV_FILE"
-  #
-  # If PORT=3000 was detected:
-  #   sed -i.bak "s/^PORT=.*/PORT=$NEW_PORT/" "$WT_PATH/$ENV_FILE"
-  #
-  # Always clean up backup:
-  #   rm -f "$WT_PATH/$ENV_FILE.bak"
+**Contract:**
 
-fi
-# __ENV_BLOCK_END__
+1. Read all worktree entries from config.
+2. If none exist, say so and show the create command.
+3. Display a formatted table with columns appropriate to what was configured. Always show: NAME, BRANCH, PORT, CREATED. Conditionally show: DATABASE, CACHE_DB (only if the project uses them).
+4. Keep the output readable — align columns, truncate long values if needed.
 
-# --- Run init commands ---
-INIT_CMDS=$(jq -r '.init_commands[]' "$CONFIG" 2>/dev/null || true)
-if [[ -n "$INIT_CMDS" ]]; then
-  echo "  Running init commands..."
-  cd "$WT_PATH"
-  while IFS= read -r cmd; do
-    echo "    \$ $cmd"
-    eval "$cmd" || echo "    Warning: '$cmd' failed"
-  done <<< "$INIT_CMDS"
-  cd "$REPO_ROOT"
-fi
-
-# --- Update config ---
-CREATED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-jq --arg name "$SANITIZED" \
-   --arg branch "$BRANCH" \
-   --argjson port "$NEW_PORT" \
-   --arg pg_db "$PG_DB" \
-   --arg redis_db "$REDIS_DB" \
-   --arg created "$CREATED_AT" \
-   --arg path "$WT_PATH" \
-   '.worktrees[$name] = {
-     branch: $branch,
-     port: $port,
-     pg_db: $pg_db,
-     redis_db: (if $redis_db == "" then null else ($redis_db | tonumber) end),
-     path: $path,
-     created: $created
-   }' "$CONFIG" > "$CONFIG.tmp" && mv "$CONFIG.tmp" "$CONFIG"
-
-echo ""
-echo "Worktree '$SANITIZED' created successfully!"
-echo ""
-echo "  Path:     $WT_PATH"
-echo "  Branch:   $BRANCH"
-echo "  Port:     $NEW_PORT"
-[[ -n "$PG_DB" ]] && echo "  Database: $PG_DB"
-[[ -n "$REDIS_DB" ]] && echo "  Redis DB: $REDIS_DB"
-echo ""
-echo "To start working:"
-echo "  cd $WT_PATH"
-```
-
-**IMPORTANT**: When writing this script, you MUST replace the `__ENV_SED_COMMANDS__` section with actual sed commands that match the specific env var patterns detected in Phase 1. Do NOT leave placeholders. For example:
-
-- If you detected `DATABASE_URL=postgresql://postgres:postgres@localhost:5432/myapp` in `.env`, write:
-  ```bash
-  sed -i.bak "s|/myapp|/$PG_DB|g" "$WT_PATH/$ENV_FILE"
-  ```
-- If you detected `PORT=3000`, write:
-  ```bash
-  sed -i.bak "s/^PORT=.*/PORT=$NEW_PORT/" "$WT_PATH/$ENV_FILE"
-  ```
-- If you detected `REDIS_URL=redis://localhost:6379/0`, write:
-  ```bash
-  sed -i.bak "s|redis://\([^/]*\)/[0-9]*|redis://\1/$REDIS_DB|g" "$WT_PATH/$ENV_FILE"
-  ```
-
-Also remove the `__BLOCK_START__/__BLOCK_END__` comment markers — they are only template guidance. Keep or remove the actual blocks based on detection.
-
-### 3.3 `.worktree/bin/wt-delete.sh`
-
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-
-REPO_ROOT="$(git rev-parse --show-toplevel)"
-WT_DIR="$REPO_ROOT/.worktree"
-CONFIG="$WT_DIR/config.json"
-
-BRANCH="${1:?Usage: git wt delete <branch>}"
-
-# Sanitize to match config key
-SANITIZED="$(echo "$BRANCH" | sed 's/[^a-zA-Z0-9._-]/-/g' | sed 's/--*/-/g' | sed 's/^-//;s/-$//')"
-
-# Look up in config (try both original and sanitized)
-if ! jq -e ".worktrees[\"$SANITIZED\"]" "$CONFIG" &>/dev/null; then
-  echo "Error: Worktree '$SANITIZED' not found in config."
-  echo "Available worktrees:"
-  jq -r '.worktrees | keys[]' "$CONFIG" 2>/dev/null || echo "  (none)"
-  exit 1
-fi
-
-WT_PATH=$(jq -r ".worktrees[\"$SANITIZED\"].path" "$CONFIG")
-PG_DB=$(jq -r ".worktrees[\"$SANITIZED\"].pg_db // empty" "$CONFIG")
-REDIS_DB=$(jq -r ".worktrees[\"$SANITIZED\"].redis_db // empty" "$CONFIG")
-
-echo "Deleting worktree '$SANITIZED'..."
-
-# --- Drop Postgres DB ---
-# __POSTGRES_DELETE_BLOCK_START__
-DB_TYPE=$(jq -r '.db_type // "none"' "$CONFIG")
-if [[ "$DB_TYPE" == "postgres" && -n "$PG_DB" && "$PG_DB" != "null" ]]; then
-  PG_HOST=$(jq -r '.postgres.host' "$CONFIG")
-  PG_PORT=$(jq -r '.postgres.port' "$CONFIG")
-  PG_USER=$(jq -r '.postgres.user' "$CONFIG")
-  PG_PASS=$(jq -r '.postgres.password' "$CONFIG")
-  export PGPASSWORD="$PG_PASS"
-
-  echo "  Dropping database: $PG_DB"
-  dropdb -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" --if-exists "$PG_DB" 2>/dev/null || \
-    echo "  Warning: Could not drop database $PG_DB"
-
-  unset PGPASSWORD
-fi
-# __POSTGRES_DELETE_BLOCK_END__
-
-# --- Flush Redis DB ---
-# __REDIS_DELETE_BLOCK_START__
-REDIS_ENABLED=$(jq -r '.redis.enabled // false' "$CONFIG")
-if [[ "$REDIS_ENABLED" == "true" && -n "$REDIS_DB" && "$REDIS_DB" != "null" ]]; then
-  REDIS_HOST=$(jq -r '.redis.host' "$CONFIG")
-  REDIS_PORT=$(jq -r '.redis.port' "$CONFIG")
-  echo "  Flushing Redis DB: $REDIS_DB"
-  redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" -n "$REDIS_DB" FLUSHDB &>/dev/null || \
-    echo "  Warning: Could not flush Redis DB $REDIS_DB"
-fi
-# __REDIS_DELETE_BLOCK_END__
-
-# --- Remove git worktree ---
-echo "  Removing git worktree..."
-if [[ -d "$WT_PATH" ]]; then
-  git worktree remove "$WT_PATH" --force 2>/dev/null || \
-    rm -rf "$WT_PATH"
-fi
-git worktree prune 2>/dev/null || true
-
-# --- Update config ---
-jq "del(.worktrees[\"$SANITIZED\"])" "$CONFIG" > "$CONFIG.tmp" && mv "$CONFIG.tmp" "$CONFIG"
-
-echo ""
-echo "Worktree '$SANITIZED' deleted successfully."
-```
-
-### 3.4 `.worktree/bin/wt-list.sh`
-
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-
-REPO_ROOT="$(git rev-parse --show-toplevel)"
-WT_DIR="$REPO_ROOT/.worktree"
-CONFIG="$WT_DIR/config.json"
-
-WORKTREES=$(jq -r '.worktrees | keys[]' "$CONFIG" 2>/dev/null || true)
-
-if [[ -z "$WORKTREES" ]]; then
-  echo "No worktrees found."
-  echo ""
-  echo "Create one with: git wt create <branch-name>"
-  exit 0
-fi
-
-# Header
-printf "%-25s %-25s %-6s %-30s %-10s %s\n" "NAME" "BRANCH" "PORT" "PG_DB" "REDIS_DB" "CREATED"
-printf "%-25s %-25s %-6s %-30s %-10s %s\n" "----" "------" "----" "-----" "--------" "-------"
-
-# Rows
-while IFS= read -r name; do
-  BRANCH=$(jq -r ".worktrees[\"$name\"].branch // \"-\"" "$CONFIG")
-  PORT=$(jq -r ".worktrees[\"$name\"].port // \"-\"" "$CONFIG")
-  PG_DB=$(jq -r ".worktrees[\"$name\"].pg_db // \"-\"" "$CONFIG")
-  REDIS_DB=$(jq -r ".worktrees[\"$name\"].redis_db // \"-\"" "$CONFIG")
-  CREATED=$(jq -r ".worktrees[\"$name\"].created // \"-\"" "$CONFIG")
-  printf "%-25s %-25s %-6s %-30s %-10s %s\n" "$name" "$BRANCH" "$PORT" "$PG_DB" "$REDIS_DB" "$CREATED"
-done <<< "$WORKTREES"
-```
+---
 
 ## Phase 4: Configure Git (Local Only)
 
-### 4.1 Add to git excludes
+**Zero tracked changes.** Nothing you do should appear in `git status`.
 
-```bash
-# Add .worktree to local excludes (NOT .gitignore)
-EXCLUDES="$(git rev-parse --show-toplevel)/.git/info/exclude"
-mkdir -p "$(dirname "$EXCLUDES")"
-if ! grep -qx '.worktree' "$EXCLUDES" 2>/dev/null; then
-  echo '.worktree' >> "$EXCLUDES"
-fi
-```
+1. **Exclude `.worktree` from git** by adding it to `.git/info/exclude` (NOT `.gitignore`). Check if it's already there before adding.
 
-### 4.2 Set up git alias
+2. **Create a local git alias** so `git wt` routes to the script:
+   ```
+   git config alias.wt '!.worktree/bin/git-wt'
+   ```
+   This is stored in `.git/config` (local only, not committed).
 
-```bash
-# Local git alias only (not global)
-git config alias.wt '!.worktree/bin/git-wt'
-```
+3. **Make all scripts executable.**
 
-### 4.3 Make scripts executable
+4. **Verify the setup works** by running `git wt help` and confirming it produces output.
 
-```bash
-chmod +x .worktree/bin/*
-```
+---
 
-## Phase 5: Report Summary
+## Phase 5: Report to the User
 
-After completing all phases, print a summary like this:
+Print a clear summary covering:
 
-```
-=== Worktree Setup Complete ===
+- What project type and stack was detected
+- What resources will be isolated per worktree (database, cache, port — only mention what applies)
+- What files were generated
+- What git config was set up (and emphasize: zero tracked changes)
+- The commands available (`git wt create/delete/list`) with examples
+- Any warnings (e.g., "Postgres CLI tools not found — database cloning will be skipped")
 
-Project detected:
-  Type:        Node.js (npm)
-  Database:    PostgreSQL (myapp @ localhost:5432)
-  Redis:       Yes (localhost:6379)
-  Base port:   3000
-  Env file:    .env
+---
 
-Generated files:
-  .worktree/config.json     - Configuration
-  .worktree/bin/git-wt      - Main command router
-  .worktree/bin/wt-create.sh - Create worktree + resources
-  .worktree/bin/wt-delete.sh - Delete worktree + cleanup
-  .worktree/bin/wt-list.sh   - List worktrees
+## Key Considerations
 
-Git config (local only):
-  .git/info/exclude         - Added .worktree
-  git alias 'wt'            - Configured
+### Portability
+- Scripts should work on both macOS and Linux.
+- Use `git rev-parse --show-toplevel` for all path resolution — never hardcode absolute paths.
+- Handle `sed -i` portability (macOS requires a backup extension argument, GNU doesn't).
+- Use `/usr/bin/env bash` shebang for portability.
 
-Usage:
-  git wt create feat/my-feature        # Create from current HEAD
-  git wt create feat/my-feature main   # Create from main branch
-  git wt list                          # List all worktrees
-  git wt delete feat/my-feature        # Delete and clean up
+### Robustness
+- Branch names can contain `/`, `.`, and other characters. The sanitization must produce safe directory names and database identifiers.
+- Port allocation should handle gaps (if worktree 1 was deleted, its port should be reusable by a new worktree).
+- Database operations can fail for many reasons (server not running, permissions, active connections). Scripts should warn and continue, not abort entirely.
+- The config file is the source of truth. If the file gets corrupted, the scripts should fail gracefully with a clear message rather than doing something destructive.
 
-Zero files modified in git — 'git status' will show a clean tree.
-```
+### Isolation
+- Each worktree gets its OWN: git working tree, env file, database, cache namespace, port.
+- The main working tree's resources are never modified — base_port, main DB, Redis DB 0 are reserved.
+- Env patching must be precise — only change the specific values that need to differ, leave everything else intact.
 
-Adapt the summary based on what was actually detected and configured. If no database was found, don't mention it. If no Redis, don't mention it. Be accurate about what was set up.
+### Cleanup
+- `git wt delete` must clean up ALL allocated resources, not just the git worktree.
+- If a resource can't be cleaned up (e.g., DB server not running), warn but still remove the config entry and git worktree — don't leave things in a half-deleted state.
 
-## Important Notes for Claude
-
-1. **Do NOT leave placeholders in scripts.** Every script must be fully functional with real values.
-2. **Adapt sed commands** to the actual env var format detected. Don't assume patterns — check the actual `.env` content.
-3. **Remove template blocks** that don't apply. If no Redis was detected, remove the Redis blocks entirely from the scripts.
-4. **macOS sed compatibility**: Use `sed -i.bak` (not `sed -i ''`) for portability, then `rm -f *.bak`.
-5. **Test the git alias** after setup by running `git wt help` and confirming it works.
-6. **If jq is not installed**, stop and inform the user — it's the one hard requirement.
-7. **Config path references** in scripts should always use `git rev-parse --show-toplevel` for portability.
+### Config as Source of Truth
+- All allocated resources (ports, DB names, cache DBs) are tracked in config.json.
+- Scripts must read from config to determine what exists — don't rely on filesystem or database state alone.
+- Config updates must be atomic (write to temp file, then rename) to avoid corruption from interrupted operations.
