@@ -148,14 +148,14 @@ Include only the sections relevant to what was detected. Example for a project w
 
 Create scripts in `.worktree/bin/`. These must be **complete, standalone, and functional** — no placeholders, no TODOs, no references back to this skill. The user (or any developer) should be able to read and understand them.
 
-You are writing four scripts. The implementation details are up to you based on what you detected, but each script must fulfill the contract described below.
+You are writing five scripts plus a shell function file. The implementation details are up to you based on what you detected, but each must fulfill the contract described below.
 
 ### 3.1 `.worktree/bin/git-wt` — Command Router
 
 **Contract:**
 - Entry point for all `git wt` commands
-- Subcommands: `create`, `delete` (aliases: `rm`, `remove`), `list` (alias: `ls`), `help`
-- Must find repo root dynamically (not hardcoded paths)
+- Subcommands: `create`, `delete` (aliases: `rm`, `remove`), `list` (alias: `ls`), `checkout` (aliases: `cd`, `go`), `help`
+- Must resolve to the **main repository root** — not the current worktree root (see "Resolving the Main Repo Root" below)
 - Must verify config exists before dispatching
 - Must verify its JSON processing dependency is available
 - Must show helpful usage on `help` or unknown command
@@ -228,9 +228,46 @@ You are writing four scripts. The implementation details are up to you based on 
 3. Display a formatted table with columns appropriate to what was configured. Always show: NAME, BRANCH, PORT, CREATED. Conditionally show: DATABASE, CACHE_DB (only if the project uses them).
 4. Keep the output readable — align columns, truncate long values if needed.
 
+### 3.5 `.worktree/bin/wt-checkout.sh` — Switch to a Worktree Directory
+
+**Arguments:** `<worktree-name>` (accepts original branch name or sanitized name)
+
+**Contract:**
+
+1. Look up the worktree in config (same fuzzy lookup as delete — accept both `feat/foo` and `feat-foo`). If not found, list available worktrees and exit with an error.
+2. Verify the worktree directory actually exists on disk. If the directory is gone but the config entry remains, warn the user.
+3. **Output the resolved absolute path** to stdout.
+
+**Why just output the path?** A script running as a git alias executes in a subshell. `cd` inside a subshell cannot change the parent shell's working directory. The script itself can only print the path — the actual directory change must happen in the user's shell.
+
+To make `git wt checkout` actually change directories, the setup must also generate a **shell function** (see section 3.6).
+
+### 3.6 Shell Function for Directory Switching
+
+The `git wt checkout` command needs a shell wrapper that can `cd` in the current shell. Generate a shell function in `.worktree/wt.sh` that the user sources from their shell profile.
+
+**Contract:**
+
+1. Define a function (e.g., `wt()`) that:
+   - If the subcommand is `checkout`, `cd`, or `go`: runs the git-wt script, captures the path output, and `cd`s to it in the current shell.
+   - For all other subcommands: passes through to `git wt` as-is.
+2. The function should handle errors (script exits non-zero → don't `cd`, show the error).
+3. Include a comment at the top explaining what the file is and how to source it.
+
+**During Phase 5 (Report)**, instruct the user to add this to their `.bashrc`/`.zshrc`:
+```
+source /path/to/repo/.worktree/wt.sh
+```
+
+After sourcing, the user can run either:
+- `wt checkout feat/foo` (shell function, actually changes directory)
+- `git wt checkout feat/foo` (git alias, prints the path — user can use `cd $(git wt checkout feat/foo)`)
+
+Both must work. The shell function is the convenient way; the git alias is the fallback that always works without shell config.
+
 ---
 
-## Phase 4: Configure Git (Local Only)
+## Phase 4: Configure Git and Shell (Local Only)
 
 **Zero tracked changes.** Nothing you do should appear in `git status`.
 
@@ -246,6 +283,8 @@ You are writing four scripts. The implementation details are up to you based on 
 
 4. **Verify the setup works** by running `git wt help` and confirming it produces output.
 
+5. **Generate the shell function file** (`.worktree/wt.sh`) as described in section 3.6. This enables `wt checkout` to change directories in the user's shell.
+
 ---
 
 ## Phase 5: Report to the User
@@ -254,20 +293,31 @@ Print a clear summary covering:
 
 - What project type and stack was detected
 - What resources will be isolated per worktree (database, cache, port — only mention what applies)
-- What files were generated
+- What files were generated (including `.worktree/wt.sh`)
 - What git config was set up (and emphasize: zero tracked changes)
-- The commands available (`git wt create/delete/list`) with examples
+- The commands available (`git wt create/delete/list/checkout`) with examples
+- How to enable the `wt` shell function for directory switching: tell the user to add `source <path>/.worktree/wt.sh` to their shell profile, and explain why (git aliases can't change directories)
 - Any warnings (e.g., "Postgres CLI tools not found — database cloning will be skipped")
 
 ---
 
 ## Key Considerations
 
+### Resolving the Main Repo Root
+
+This is critical. All scripts need to find the **main repository root** where `.worktree/` lives — not the current worktree's root.
+
+`git rev-parse --show-toplevel` returns the root of whichever working tree you're currently in. If you're inside a worktree at `.worktree/feat-foo/`, it returns that path — not the main repo. So using `--show-toplevel` alone would fail to find `.worktree/config.json` when running from inside a worktree.
+
+The scripts must resolve the main repo root regardless of whether the user is in the main working tree or any worktree. `git rev-parse --git-common-dir` returns the path to the shared `.git` directory, which always belongs to the main repo. From that, the main repo root can be derived (it's the parent of the `.git` directory). There may be other approaches — choose whatever is robust and works across git versions.
+
+Every script must use this resolution. Do not assume the user is in the main working tree.
+
 ### Portability
 - Scripts should work on both macOS and Linux.
-- Use `git rev-parse --show-toplevel` for all path resolution — never hardcode absolute paths.
 - Handle `sed -i` portability (macOS requires a backup extension argument, GNU doesn't).
 - Use `/usr/bin/env bash` shebang for portability.
+- Use dynamic path resolution as described above — never hardcode absolute paths.
 
 ### Robustness
 - Branch names can contain `/`, `.`, and other characters. The sanitization must produce safe directory names and database identifiers.
