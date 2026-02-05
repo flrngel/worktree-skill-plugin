@@ -24,26 +24,12 @@ Claude analyzes your project — env vars, database type, cache, package manager
 git wt create feat/my-feature        # Create worktree from current HEAD
 git wt create feat/my-feature main   # Create worktree from a specific branch
 git wt list                          # List all managed worktrees
-git wt checkout feat/my-feature      # Switch to a worktree directory
-git wt checkout                      # Switch back to the main repo
+cd $(git wt checkout feat/my-feature)  # Switch to a worktree directory
+cd $(git wt checkout)                  # Switch back to the main repo
 git wt delete feat/my-feature        # Delete worktree and clean up all resources
 ```
 
 All commands work from the main repo **or** from inside any worktree.
-
-### Directory switching
-
-`git wt checkout` prints the worktree path (git aliases run in subshells and can't `cd`). For convenience, the setup also generates a shell function at `.worktree/wt.sh`. Add this to your `.bashrc`/`.zshrc`:
-
-```bash
-source /path/to/your/repo/.worktree/wt.sh
-```
-
-Then use:
-- `wt checkout feat/my-feature` to switch to a worktree
-- `wt checkout` to go back to the main repo
-
-Other subcommands (`wt create`, `wt list`, etc.) pass through to `git wt`.
 
 ## What It Does
 
@@ -52,8 +38,7 @@ When you run `/worktree-setup`, Claude:
 1. **Analyzes your project** — detects language/framework, package manager, database, cache, env var patterns, ports, Docker Compose services, and available CLI tools
 2. **Generates `.worktree/config.json`** — stores detected settings and tracks active worktrees
 3. **Generates `.worktree/bin/` scripts** — standalone bash scripts customized to your project's stack and tools
-4. **Generates `.worktree/wt.sh`** — shell function for directory switching (`wt checkout`)
-5. **Configures local git** — adds `git wt` alias and excludes `.worktree` from tracking
+4. **Configures local git** — adds `git wt` alias and excludes `.worktree` from tracking
 
 ### What `git wt create` does
 

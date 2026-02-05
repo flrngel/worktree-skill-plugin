@@ -148,7 +148,7 @@ Include only the sections relevant to what was detected. Example for a project w
 
 Create scripts in `.worktree/bin/`. These must be **complete, standalone, and functional** — no placeholders, no TODOs, no references back to this skill. The user (or any developer) should be able to read and understand them.
 
-You are writing five scripts plus a shell function file. The implementation details are up to you based on what you detected, but each must fulfill the contract described below.
+You are writing five scripts. The implementation details are up to you based on what you detected, but each must fulfill the contract described below.
 
 ### 3.1 `.worktree/bin/git-wt` — Command Router
 
@@ -239,37 +239,14 @@ You are writing five scripts plus a shell function file. The implementation deta
 3. Verify the target directory actually exists on disk. If the directory is gone but the config entry remains, warn the user.
 4. **Output the resolved absolute path** to stdout.
 
-**Why just output the path?** A script running as a git alias executes in a subshell. `cd` inside a subshell cannot change the parent shell's working directory. The script itself can only print the path — the actual directory change must happen in the user's shell.
-
-To make `git wt checkout` actually change directories, the setup must also generate a **shell function** (see section 3.6).
-
-### 3.6 Shell Function for Directory Switching
-
-The `git wt checkout` command needs a shell wrapper that can `cd` in the current shell. Generate a shell function in `.worktree/wt.sh` that the user sources from their shell profile.
-
-**Contract:**
-
-1. Define a function (e.g., `wt()`) that:
-   - If the subcommand is `checkout`, `cd`, or `go`: runs the git-wt script, captures the path output, and `cd`s to it in the current shell.
-   - For all other subcommands: passes through to `git wt` as-is.
-2. The function should handle errors (script exits non-zero → don't `cd`, show the error).
-3. Include a comment at the top explaining what the file is and how to source it.
-
-**During Phase 5 (Report)**, instruct the user to add this to their `.bashrc`/`.zshrc`:
+**Note:** A git alias runs in a subshell and cannot change the parent shell's working directory. `git wt checkout` outputs the path to stdout so the user can compose it with `cd`:
 ```
-source /path/to/repo/.worktree/wt.sh
+cd $(git wt checkout feat/foo)
 ```
-
-After sourcing, the user can run either:
-- `wt checkout feat/foo` (shell function, actually changes directory)
-- `wt checkout` or `wt checkout -` (go back to the main repo)
-- `git wt checkout feat/foo` (git alias, prints the path — user can use `cd $(git wt checkout feat/foo)`)
-
-Both forms must work. The shell function is the convenient way; the git alias is the fallback that always works without shell config.
 
 ---
 
-## Phase 4: Configure Git and Shell (Local Only)
+## Phase 4: Configure Git (Local Only)
 
 **Zero tracked changes.** Nothing you do should appear in `git status`.
 
@@ -285,8 +262,6 @@ Both forms must work. The shell function is the convenient way; the git alias is
 
 4. **Verify the setup works** by running `git wt help` and confirming it produces output.
 
-5. **Generate the shell function file** (`.worktree/wt.sh`) as described in section 3.6. This enables `wt checkout` to change directories in the user's shell.
-
 ---
 
 ## Phase 5: Report to the User
@@ -295,10 +270,10 @@ Print a clear summary covering:
 
 - What project type and stack was detected
 - What resources will be isolated per worktree (database, cache, port — only mention what applies)
-- What files were generated (including `.worktree/wt.sh`)
+- What files were generated
 - What git config was set up (and emphasize: zero tracked changes)
 - The commands available (`git wt create/delete/list/checkout`) with examples
-- How to enable the `wt` shell function for directory switching: tell the user to add `source <path>/.worktree/wt.sh` to their shell profile, and explain why (git aliases can't change directories)
+- For checkout, show the `cd $(git wt checkout <name>)` usage pattern
 - Any warnings (e.g., "Postgres CLI tools not found — database cloning will be skipped")
 
 ---
