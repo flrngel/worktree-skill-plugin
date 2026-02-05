@@ -25,6 +25,7 @@ git wt create feat/my-feature        # Create worktree from current HEAD
 git wt create feat/my-feature main   # Create worktree from a specific branch
 git wt list                          # List all managed worktrees
 git wt checkout feat/my-feature      # Switch to a worktree directory
+git wt checkout                      # Switch back to the main repo
 git wt delete feat/my-feature        # Delete worktree and clean up all resources
 ```
 
@@ -38,7 +39,11 @@ All commands work from the main repo **or** from inside any worktree.
 source /path/to/your/repo/.worktree/wt.sh
 ```
 
-Then use `wt checkout feat/my-feature` to actually change directories. Other subcommands (`wt create`, `wt list`, etc.) pass through to `git wt`.
+Then use:
+- `wt checkout feat/my-feature` to switch to a worktree
+- `wt checkout` to go back to the main repo
+
+Other subcommands (`wt create`, `wt list`, etc.) pass through to `git wt`.
 
 ## What It Does
 

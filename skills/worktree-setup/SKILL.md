@@ -228,15 +228,16 @@ You are writing five scripts plus a shell function file. The implementation deta
 3. Display a formatted table with columns appropriate to what was configured. Always show: NAME, BRANCH, PORT, CREATED. Conditionally show: DATABASE, CACHE_DB (only if the project uses them).
 4. Keep the output readable — align columns, truncate long values if needed.
 
-### 3.5 `.worktree/bin/wt-checkout.sh` — Switch to a Worktree Directory
+### 3.5 `.worktree/bin/wt-checkout.sh` — Switch to a Worktree or Main Repo Directory
 
-**Arguments:** `<worktree-name>` (accepts original branch name or sanitized name)
+**Arguments:** `[worktree-name]` (optional; accepts original branch name or sanitized name)
 
 **Contract:**
 
-1. Look up the worktree in config (same fuzzy lookup as delete — accept both `feat/foo` and `feat-foo`). If not found, list available worktrees and exit with an error.
-2. Verify the worktree directory actually exists on disk. If the directory is gone but the config entry remains, warn the user.
-3. **Output the resolved absolute path** to stdout.
+1. **No argument or `-` or `main`**: Output the main repository root path. This lets the user switch back to the main repo from any worktree.
+2. **With a worktree name**: Look up the worktree in config (same fuzzy lookup as delete — accept both `feat/foo` and `feat-foo`). If not found, list available worktrees and exit with an error.
+3. Verify the target directory actually exists on disk. If the directory is gone but the config entry remains, warn the user.
+4. **Output the resolved absolute path** to stdout.
 
 **Why just output the path?** A script running as a git alias executes in a subshell. `cd` inside a subshell cannot change the parent shell's working directory. The script itself can only print the path — the actual directory change must happen in the user's shell.
 
@@ -261,9 +262,10 @@ source /path/to/repo/.worktree/wt.sh
 
 After sourcing, the user can run either:
 - `wt checkout feat/foo` (shell function, actually changes directory)
+- `wt checkout` or `wt checkout -` (go back to the main repo)
 - `git wt checkout feat/foo` (git alias, prints the path — user can use `cd $(git wt checkout feat/foo)`)
 
-Both must work. The shell function is the convenient way; the git alias is the fallback that always works without shell config.
+Both forms must work. The shell function is the convenient way; the git alias is the fallback that always works without shell config.
 
 ---
 
